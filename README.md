@@ -12,7 +12,7 @@ This repository is a code supplement to the following [paper](https://openreview
 
 **TL;DR:** We introduce faithful interaction explanations of CLIP and SigLIP models (FIxLIP), offering a unique, game-theoretic perspective on interpreting image–text similarity predictions.
 
-[![](assets/figure1.png)](https://openreview.net/forum?id=on22Rx5A4F)
+[![](assets/poster.png)](assets/poster.pdf)
 
 ## Setup
 
@@ -69,7 +69,7 @@ src.plot.plot_image_and_text_together(
 )
 ```
 
-[![](assets/figure2.png)](https://openreview.net/forum?id=on22Rx5A4F)
+[![](assets/figure1.png)](https://openreview.net/forum?id=on22Rx5A4F)
 
 
 ## Running experiments
@@ -81,6 +81,8 @@ src.plot.plot_image_and_text_together(
 * `analysis` - analyze and visualize the results
 * `gradeclip` - code and experiments with Grad-ECLIP
 * `exclip` - code and experiments with exCLIP
+
+[![](assets/figure2.png)](https://openreview.net/forum?id=on22Rx5A4F)
 
 ## Citation
 
