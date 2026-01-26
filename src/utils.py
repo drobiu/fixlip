@@ -52,32 +52,6 @@ def convert_iv_to_first_order(iv: shapiq.InteractionValues, p_sampler=0.5):
     )
 
 
-def convert_iv_to_first_order(iv: shapiq.InteractionValues, p_sampler=0.5):
-    """p_sampler for Banzhaf and Shapley is 0.5"""
-    if iv.max_order == 1:
-        warnings.warn("Input to convert_iv_to_first_order() has max_order=1. Returning the object.")
-        return iv
-    dict_sv = {(): iv.dict_values[()]}
-    dict_sv = {k: v for k, v in iv.dict_values.items() if len(k) == 1}
-    for i in range(iv.n_players):
-        for j in range(i + 1, iv.n_players):
-            if (i, j) in iv.dict_values:
-                contr = p_sampler * iv.dict_values[(i, j)]
-                dict_sv[(i,)] += contr
-                dict_sv[(j,)] += contr
-
-    return shapiq.InteractionValues(
-        values=np.array([v for _, v in dict_sv.items()]),
-        index=iv.index,
-        max_order=1,
-        n_players=iv.n_players,
-        min_order=iv.min_order,
-        interaction_lookup={k: i for i, (k, _) in enumerate(dict_sv.items())},
-        estimated=iv.estimated,
-        estimation_budget=iv.estimation_budget,
-        baseline_value=iv.baseline_value,
-    )
-
 def convert_exclip_to_first_order(iv: shapiq.InteractionValues, n_players_image, n_players_text):
     dict_sv = {(): iv.dict_values[()]}
     dict_sv = {k: v for k, v in iv.dict_values.items() if len(k) == 1}
