@@ -106,3 +106,5 @@ FIxLIP is powered by [`shapiq`](https://github.com/mmschlk/shapiq). See also [Gr
 
 
 This work was financially supported by the state budget within the Polish Ministry of Science and Higher Education program "Pearls of Science" project number PN/01/0087/2022.
+
+<img src="images/logo.png" width="250px">
