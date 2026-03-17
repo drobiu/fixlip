@@ -16,14 +16,25 @@ This repository is a code supplement to the following [paper](https://openreview
 
 ## Setup
 
+The original environment for reproducibility:
+
 ```bash
 conda env create -f env.yml
 conda activate fixlip
 ```
 
+The new environment with updated `shapiq` allowing faster computation:
+
+```bash
+conda env create -f env_faster.yml
+conda activate fixlip_faster
+```
+
 ## Getting started
 
-Check out the demo for explaining CLIP with FIxLIP in `example.ipynb`.
+Check out the demo for explaining CLIP with FIxLIP in [`example.ipynb`](/example.ipynb).
+
+**New!** For significantly faster computation, check out our updated implementation in [`example_faster.ipynb`](/example_faster.ipynb).
 
 ```python
 import src

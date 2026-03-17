@@ -21,10 +21,12 @@ class FIxLIP:
             max_order=2, 
             random_state=None,
             sparse_regression=False,
+            approximation_type="original"
         ):
         self.mode = mode
         self.sparse_regression = sparse_regression
         self.is_crossmodal = False
+        self.approximation_type = approximation_type
 
         if n_players_image and n_players_text:
             if mode.lower() == "shapley":
@@ -98,29 +100,66 @@ class FIxLIP:
         if time_game:
             self.time_game_end = time.time()
         coalition_values = coalition_values - game.normalization_value
-        if self.mode.lower() == "banzhaf":
-            # set kernel weights for weighted banzhaf
-            kernel_weights = np.array([self.p ** k * ((1 - self.p) ** (self.n_players - k))\
-                                        for k in range(self.n_players + 1)])
-        elif self.mode.lower() == "shapley":
-            kernel_weights = np.zeros(self.n_players + 1)
-            normalization_constant = 0
-            for coalition_size in range(1, self.n_players):
-                kernel_weights[coalition_size] = 1 / sp.special.binom(self.n_players - 2, coalition_size - 1)
-                normalization_constant += kernel_weights[coalition_size] * sp.special.binom(self.n_players, coalition_size)
-            # Normalize kernel weights to probability distribution
-            kernel_weights /= normalization_constant
-            big_M = 10e6
-            kernel_weights[0] = big_M
-            kernel_weights[-1] = big_M
-        regression_weights = get_regression_weights(self.sampler, kernel_weights)
-        # aggregate coalition values
-        interaction_values = self.aggregate(
-            coalition_matrix=self.sampler.coalitions_matrix, 
-            regression_weights=regression_weights,
-            coalition_values=coalition_values,
-            interaction_lookup=interaction_lookup
-        )
+
+        if self.approximation_type == "original":
+            if self.mode.lower() == "banzhaf":
+                # set kernel weights for weighted banzhaf
+                kernel_weights = np.array([self.p ** k * ((1 - self.p) ** (self.n_players - k))\
+                                            for k in range(self.n_players + 1)])
+            elif self.mode.lower() == "shapley":
+                kernel_weights = np.zeros(self.n_players + 1)
+                normalization_constant = 0
+                for coalition_size in range(1, self.n_players):
+                    kernel_weights[coalition_size] = 1 / sp.special.binom(self.n_players - 2, coalition_size - 1)
+                    normalization_constant += kernel_weights[coalition_size] * sp.special.binom(self.n_players, coalition_size)
+                # Normalize kernel weights to probability distribution
+                kernel_weights /= normalization_constant
+                big_M = 10e6
+                kernel_weights[0] = big_M
+                kernel_weights[-1] = big_M
+            regression_weights = get_regression_weights(self.sampler, kernel_weights)
+            # aggregate coalition values
+            interaction_values = self.aggregate(
+                coalition_matrix=self.sampler.coalitions_matrix, 
+                regression_weights=regression_weights,
+                coalition_values=coalition_values,
+                interaction_lookup=interaction_lookup
+            )
+        elif self.approximation_type == "proxyshap":
+            # cf. https://github.com/mmschlk/shapiq/blob/ec73ba9746c367f4407603d32a4d587c7e4548f5/src/shapiq/approximator/proxy/proxyshap.py#L239-L285
+            from shapiq.tree.interventional.explainer import InterventionalTreeExplainer
+            from xgboost import XGBRegressor
+            proxy_model = XGBRegressor(
+                n_estimators=2000,
+                max_depth=3,
+                learning_rate=0.05,
+                reg_lambda=5,
+                random_state=self.random_state
+            )
+            proxy_model.fit(self.sampler.coalitions_matrix, coalition_values)
+            explainer = InterventionalTreeExplainer(
+                proxy_model,
+                data=np.zeros((1, self.n_players)),  # reference data for boolean tree
+                class_index=None,
+                index="FBII" if self.mode.lower() == "banzhaf" else "FSII",
+                max_order=self.max_order,
+                bool_tree=True,
+            )
+            values = explainer.explain_function(np.ones((1, self.n_players)))
+            interaction_values = shapiq.InteractionValues(
+                values=values.interactions,
+                index="FBII" if self.mode.lower() == "banzhaf" else "FSII",
+                max_order=self.max_order,
+                n_players=self.n_players,
+                min_order=0,
+                estimated=budget >= 2**self.n_players,
+                estimation_budget=budget,
+                baseline_value=float(game.normalization_value),
+            )
+            interaction_values[()] = float(game.normalization_value)  # Ensure empty coalition value is correct
+            # Ensure that all values are present and pad with zeros if necessary.
+            interaction_values = populate_sparse_iv_with_zeros(interaction_values)
+
         return interaction_values
 
 
@@ -269,3 +308,26 @@ def get_regression_weights(sampler, kernel_weights):
     regression_weights[~sampler.is_coalition_sampled] = regression_weights[~sampler.is_coalition_sampled] * \
                                                         regression_weights_not_sampled[~sampler.is_coalition_sampled]
     return regression_weights
+
+
+def populate_sparse_iv_with_zeros(iv):
+    """Fills in the interaction values object with zeros for missing attributions."""
+    new_values = []
+    new_interaction_lookup = {}
+    for index, interaction in enumerate(shapiq.utils.sets.powerset(range(iv.n_players), min_size=iv.min_order, max_size=iv.max_order)):
+        new_interaction_lookup[interaction] = index
+        if interaction in iv.interaction_lookup:
+            new_values.append(iv[interaction])
+        else:
+            new_values.append(0.0)
+    return shapiq.InteractionValues(
+        values=np.array(new_values, dtype=float),
+        index=iv.index,
+        max_order=iv.max_order,
+        n_players=iv.n_players,
+        min_order=iv.min_order,
+        interaction_lookup=new_interaction_lookup,
+        estimated=iv.estimated,
+        estimation_budget=iv.estimation_budget,
+        baseline_value=iv.baseline_value
+    )
