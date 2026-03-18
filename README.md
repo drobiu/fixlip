@@ -12,7 +12,7 @@ This repository is a code supplement to the following [paper](https://openreview
 
 **TL;DR:** We introduce faithful interaction explanations of CLIP and SigLIP models (FIxLIP), offering a unique, game-theoretic perspective on interpreting image–text similarity predictions.
 
-**New!** For a faster and more reliable computation, check out our updated implementation in [`example_faster.ipynb`](/example_faster.ipynb).
+**New!** For a faster and more reliable computation, check out our new implementation in [`example_faster.ipynb`](/example_faster.ipynb).
 
 [![](assets/poster.png)](assets/poster.pdf)
 
@@ -25,7 +25,7 @@ conda env create -f env.yml
 conda activate fixlip
 ```
 
-The new environment with updated `shapiq` allowing faster computation:
+The new environment with the updated [`shapiq`](https://github.com/mmschlk/shapiq) package allowing faster computation:
 
 ```bash
 conda env create -f env_faster.yml
@@ -42,9 +42,9 @@ import torch
 from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
 # load model
-processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
 model.to('cuda')
+processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 # load data
 input_text = "black dog next to a yellow hydrant"
 input_image = Image.open("assets/dog_and_hydrant.png")
@@ -89,7 +89,7 @@ src.plot.plot_image_and_text_together(
 
 ## Faster and more reliable FIxLIP approximation
 
-Check out the demo for explaining CLIP with FIxLIP via ProxySHAP in [`example_faster.ipynb`](/example_faset.ipynb).
+Check out the demo for explaining CLIP with FIxLIP via ProxySHAP in [`example_faster.ipynb`](/example_faster.ipynb).
 
 ```python
 import src
@@ -97,9 +97,9 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModel
 # load model
-processor = AutoProcessor.from_pretrained("google/siglip2-base-patch32-256")
 model = AutoModel.from_pretrained("google/siglip2-base-patch32-256")
 model.to('cuda')
+processor = AutoProcessor.from_pretrained("google/siglip2-base-patch32-256")
 # load data
 input_text = "a giraffe drinking water from a river"
 input_image = Image.open("assets/giraffe_drinking.jpg")
