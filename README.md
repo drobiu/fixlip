@@ -12,6 +12,8 @@ This repository is a code supplement to the following [paper](https://openreview
 
 **TL;DR:** We introduce faithful interaction explanations of CLIP and SigLIP models (FIxLIP), offering a unique, game-theoretic perspective on interpreting image–text similarity predictions.
 
+**New!** For a faster and more reliable computation, check out our updated implementation in [`example_faster.ipynb`](/example_faster.ipynb).
+
 [![](assets/poster.png)](assets/poster.pdf)
 
 ## Setup
@@ -33,8 +35,6 @@ conda activate fixlip_faster
 ## Getting started
 
 Check out the demo for explaining CLIP with FIxLIP in [`example.ipynb`](/example.ipynb).
-
-**New!** For significantly faster computation, check out our updated implementation in [`example_faster.ipynb`](/example_faster.ipynb).
 
 ```python
 import src
@@ -58,15 +58,19 @@ game = src.game_huggingface.VisionLanguageGame(
 )
 # define approximator
 fixlip = src.fixlip.FIxLIP(
-    n_players_image=game.n_players_image,
-    n_players_text= game.n_players_text, 
+    n_players_text=game.n_players_text,
+    n_players_image=game.n_players_image, 
     max_order=2,
     p=0.5, # weight
     mode="banzhaf",
     random_state=0
 )
 # compute explanation
-interaction_values = fixlip.approximate_crossmodal(game, budget=2**19)
+interaction_values = fixlip.approximate_crossmodal(
+    game=game, 
+    budget_text=2**6
+    budget_image=2**13,
+)
 print(interaction_values)
 # visualize explanation
 text_tokens, input_image_denormalized = ...
@@ -82,6 +86,59 @@ src.plot.plot_image_and_text_together(
 
 [![](assets/figure1.png)](https://openreview.net/forum?id=on22Rx5A4F)
 
+
+## Faster and more reliable FIxLIP approximation
+
+Check out the demo for explaining CLIP with FIxLIP via ProxySHAP in [`example_faster.ipynb`](/example_faset.ipynb).
+
+```python
+import src
+import torch
+from PIL import Image
+from transformers import AutoProcessor, AutoModel
+# load model
+processor = AutoProcessor.from_pretrained("google/siglip2-base-patch32-256")
+model = AutoModel.from_pretrained("google/siglip2-base-patch32-256")
+model.to('cuda')
+# load data
+input_text = "a giraffe drinking water from a river"
+input_image = Image.open("assets/giraffe_drinking.jpg")
+# define game
+game = src.game_huggingface.VisionLanguageGame(
+    model=model,
+    processor=processor,
+    input_image=input_image,
+    input_text=input_text,
+    batch_size=64
+)
+# define approximator
+fixlip = src.fixlip.FIxLIP(
+    n_players_text=game.n_players_text, 
+    n_players_image=game.n_players_image,
+    random_state=0
+)
+# compute explanation
+interaction_values = fixlip.approximate_crossmodal(
+    game=game, 
+    budget_text=2**5,
+    budget_image=2**13,
+    approximation_type="proxyshap" # new!
+)
+print(interaction_values)
+# visualize explanation
+text_tokens, input_image_denormalized = ...
+clique = {77, 78, 91, 105, 197, 198}
+_ = src.plot.plot_interaction_subset(
+    iv=interaction_values,
+    clique=clique,
+    image_players=list(range(game.n_players_image)),
+    img=input_image_denormalized,
+    text=text_tokens,
+    ...
+)
+```
+
+[![](assets/figure_poster.png)](https://openreview.net/forum?id=on22Rx5A4F)
 
 ## Running experiments
 

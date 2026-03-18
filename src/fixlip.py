@@ -20,13 +20,11 @@ class FIxLIP:
             p=0.5, 
             max_order=2, 
             random_state=None,
-            sparse_regression=False,
-            approximation_type="original"
+            sparse_regression=False
         ):
         self.mode = mode
         self.sparse_regression = sparse_regression
         self.is_crossmodal = False
-        self.approximation_type = approximation_type
 
         if n_players_image and n_players_text:
             if mode.lower() == "shapley":
@@ -90,7 +88,15 @@ class FIxLIP:
         )
 
 
-    def approximate(self, game, budget, interaction_lookup=None, time_game=False):
+    def approximate(
+            self, 
+            game, 
+            budget, 
+            interaction_lookup=None, 
+            time_game=False, 
+            approximation_type="original",
+            **kwargs
+        ):
         # sample coalitions
         self.sampler.sample(budget)
         # evaluate coalition values (un-normalized game call)
@@ -101,7 +107,7 @@ class FIxLIP:
             self.time_game_end = time.time()
         coalition_values = coalition_values - game.normalization_value
 
-        if self.approximation_type == "original":
+        if approximation_type == "original":
             if self.mode.lower() == "banzhaf":
                 # set kernel weights for weighted banzhaf
                 kernel_weights = np.array([self.p ** k * ((1 - self.p) ** (self.n_players - k))\
@@ -125,17 +131,19 @@ class FIxLIP:
                 coalition_values=coalition_values,
                 interaction_lookup=interaction_lookup
             )
-        elif self.approximation_type == "proxyshap":
+        elif approximation_type == "proxyshap":
             # cf. https://github.com/mmschlk/shapiq/blob/ec73ba9746c367f4407603d32a4d587c7e4548f5/src/shapiq/approximator/proxy/proxyshap.py#L239-L285
             from shapiq.tree.interventional.explainer import InterventionalTreeExplainer
             from xgboost import XGBRegressor
-            proxy_model = XGBRegressor(
-                n_estimators=2000,
-                max_depth=3,
-                learning_rate=0.05,
-                reg_lambda=5,
-                random_state=self.random_state
-            )
+            defaults = {
+                "n_estimators": 2000,
+                "learning_rate": 0.05,
+                "max_depth": 3,
+                "reg_lambda": 5,
+                "random_state": self.random_state
+            }
+            defaults.update(kwargs)
+            proxy_model = XGBRegressor(**defaults)
             proxy_model.fit(self.sampler.coalitions_matrix, coalition_values)
             explainer = InterventionalTreeExplainer(
                 proxy_model,
@@ -152,7 +160,7 @@ class FIxLIP:
                 max_order=self.max_order,
                 n_players=self.n_players,
                 min_order=0,
-                estimated=budget >= 2**self.n_players,
+                estimated=2 ** self.n_players > budget,
                 estimation_budget=budget,
                 baseline_value=float(game.normalization_value),
             )
@@ -163,7 +171,17 @@ class FIxLIP:
         return interaction_values
 
 
-    def approximate_crossmodal(self, game, budget=None, budget_image=None, budget_text=None, interaction_lookup=None, time_game=False):
+    def approximate_crossmodal(
+        self, 
+        game, 
+        budget=None, 
+        budget_image=None, 
+        budget_text=None, 
+        interaction_lookup=None, 
+        time_game=False, 
+        approximation_type="original",
+        **kwargs
+    ):
         if not self.is_crossmodal:
             raise ValueError("Crossmodal approximation is not initialized."+\
                              "Pass `n_players_image` and `n_players_text` to FIxLIP().")
@@ -174,6 +192,8 @@ class FIxLIP:
             budget_image, budget_text = self.split_budget(budget)
         elif budget_image is None or budget_text is None:
             raise ValueError("Pass either `budget` or `budget_image` and `budget_text`.")
+        else:
+            budget = budget_image * budget_text
         # sample coalitions from both modalities
         self.sampler_image.sample(budget_image)
         self.sampler_text.sample(budget_text)
@@ -193,29 +213,62 @@ class FIxLIP:
             np.repeat(self.sampler_image.coalitions_matrix, budget_text, axis=0), 
             np.tile(self.sampler_text.coalitions_matrix, (budget_image, 1))
         ], axis=1)
-        # combine sampling_adjustment_weights based on both samplers 
-        #sampling_adjustment_weights = np.outer(
-        #    self.sampler_image.sampling_adjustment_weights,
-        #    self.sampler_text.sampling_adjustment_weights
-        #).reshape(-1)
-        # set kernel weights for image and text using banzhaf
-        kernel_weights_image = np.array([self.p ** k * ((1 - self.p) ** (self.n_players_image - k)) \
-                                              for k in range(self.n_players_image + 1)])
-        kernel_weights_text = np.array([self.p ** k * ((1 - self.p) ** (self.n_players_text - k)) \
-                                             for k in range(self.n_players_text + 1)])
-        image_regression_weights = get_regression_weights(self.sampler_image, kernel_weights_image)
-        text_regression_weights = get_regression_weights(self.sampler_text, kernel_weights_text)
-        regression_weights = np.outer(
-            image_regression_weights,
-            text_regression_weights
-        ).reshape(-1)
-        # aggregate coalition values with aggregate()
-        interaction_values = self.aggregate(
-            coalition_matrix=coalitions_matrix, 
-            regression_weights=regression_weights,
-            coalition_values=coalition_values,
-            interaction_lookup=interaction_lookup
-        )
+        if approximation_type == "original":
+            # set kernel weights for image and text using banzhaf
+            kernel_weights_image = np.array([self.p ** k * ((1 - self.p) ** (self.n_players_image - k)) \
+                                                for k in range(self.n_players_image + 1)])
+            kernel_weights_text = np.array([self.p ** k * ((1 - self.p) ** (self.n_players_text - k)) \
+                                                for k in range(self.n_players_text + 1)])
+            image_regression_weights = get_regression_weights(self.sampler_image, kernel_weights_image)
+            text_regression_weights = get_regression_weights(self.sampler_text, kernel_weights_text)
+            regression_weights = np.outer(
+                image_regression_weights,
+                text_regression_weights
+            ).reshape(-1)
+            # aggregate coalition values with aggregate()
+            interaction_values = self.aggregate(
+                coalition_matrix=coalitions_matrix, 
+                regression_weights=regression_weights,
+                coalition_values=coalition_values,
+                interaction_lookup=interaction_lookup
+            )
+        elif approximation_type == "proxyshap":
+            # cf. https://github.com/mmschlk/shapiq/blob/ec73ba9746c367f4407603d32a4d587c7e4548f5/src/shapiq/approximator/proxy/proxyshap.py#L239-L285
+            from shapiq.tree.interventional.explainer import InterventionalTreeExplainer
+            from xgboost import XGBRegressor
+            defaults = {
+                "n_estimators": 2000,
+                "learning_rate": 0.05,
+                "max_depth": 3,
+                "reg_lambda": 5,
+                "random_state": self.random_state
+            }
+            defaults.update(kwargs)
+            proxy_model = XGBRegressor(**defaults)
+            proxy_model.fit(coalitions_matrix, coalition_values)
+            explainer = InterventionalTreeExplainer(
+                proxy_model,
+                data=np.zeros((1, self.n_players)),  # reference data for boolean tree
+                class_index=None,
+                index="FBII" if self.mode.lower() == "banzhaf" else "FSII",
+                max_order=self.max_order,
+                bool_tree=True,
+            )
+            values = explainer.explain_function(np.ones((1, self.n_players)))
+            interaction_values = shapiq.InteractionValues(
+                values=values.interactions,
+                index="FBII" if self.mode.lower() == "banzhaf" else "FSII",
+                max_order=self.max_order,
+                n_players=self.n_players,
+                min_order=0,
+                estimated=2**self.n_players > budget,
+                estimation_budget=budget,
+                baseline_value=float(game.normalization_value),
+            )
+            interaction_values[()] = float(game.normalization_value)  # Ensure empty coalition value is correct
+            # Ensure that all values are present and pad with zeros if necessary.
+            interaction_values = populate_sparse_iv_with_zeros(interaction_values)
+
         return interaction_values
 
 
@@ -249,7 +302,7 @@ class FIxLIP:
             index="Moebius",
             max_order=self.max_order,
             min_order=0,
-            estimated=False if n_coalitions >= 2 ** n_players else True,
+            estimated=2 ** n_players > n_coalitions,
             estimation_budget=n_coalitions,
         )
         interaction_values.index = "FSII" if self.mode.lower() == "shapley" else "FWBII"

@@ -679,6 +679,7 @@ def plot_interaction_subset(
     image_size: float = 1,
     edges_size: float = 3,
     figsize=(4,4),
+    max_value=None,
     plot_main_effect: bool = False,
 ) -> tuple[plt.Figure, plt.Axes]:
     """Visualizes all second order interactions of a clique (a subset of players) with the SI graph.
@@ -701,7 +702,7 @@ def plot_interaction_subset(
     n_image_players = len(image_players)
     image_patches = image_into_patches(img, n_image_players)
 
-    colors = interactions_to_color(iv, max_value=None)
+    colors = interactions_to_color(iv, max_value=max_value)
 
     # get the interaction values for the clique
     iv_subset = iv.get_n_order(order=2)
