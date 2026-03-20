@@ -97,6 +97,8 @@ class FIxLIP:
             approximation_type="original",
             **kwargs
         ):
+        if interaction_lookup is not None and approximation_type != "original":
+            raise ValueError("`interaction_lookup` is only used for `approximation_type='original'`.")
         # sample coalitions
         self.sampler.sample(budget)
         # evaluate coalition values (un-normalized game call)
@@ -185,6 +187,8 @@ class FIxLIP:
         if not self.is_crossmodal:
             raise ValueError("Crossmodal approximation is not initialized."+\
                              "Pass `n_players_image` and `n_players_text` to FIxLIP().")
+        if interaction_lookup is not None and approximation_type != "original":
+            raise ValueError("`interaction_lookup` is only used for `approximation_type='original'`.")
         # split budget based on n_players_text and n_players_image
         if budget is not None:
             if budget < 4:
