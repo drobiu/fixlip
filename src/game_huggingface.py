@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import numpy as np
 import torch
 
@@ -117,23 +119,19 @@ class VisionLanguageGame(Game):
         coalitions_outputs = []
         for batch_index in range(batch_iters + 1):
             if batch_index < batch_iters:
-                inputs = {
-                    "input_ids": inputs_original["input_ids"],
-                    "attention_mask": text_attention_masks[(batch_index * batch_size):((batch_index + 1) * batch_size)],
-                    "pixel_values": inputs_original["pixel_values"] * image_binary_masks[(batch_index * batch_size):((batch_index + 1) * batch_size)]
-                }
+                inputs = deepcopy(inputs_original)
+                inputs['attention_mask'] = text_attention_masks[(batch_index * batch_size):((batch_index + 1) * batch_size)]
+                inputs['pixel_values'] = inputs['pixel_values'] *\
+                      image_binary_masks[(batch_index * batch_size):((batch_index + 1) * batch_size)]
             elif batch_left > 0: # process last batch (once)
-                inputs_left = self._processor_function([self.input_image]*batch_left, [self.input_text]*batch_left)
-                inputs = {
-                    "input_ids": inputs_left["input_ids"],
-                    "attention_mask": text_attention_masks[(batch_index * batch_size):(batch_index * batch_size + batch_left)],
-                    "pixel_values": inputs_left["pixel_values"] * image_binary_masks[(batch_index * batch_size):(batch_index * batch_size + batch_left)]
-                }
+                inputs = self._processor_function([self.input_image]*batch_left, [self.input_text]*batch_left)
+                inputs['attention_mask'] = text_attention_masks[(batch_index * batch_size):(batch_index * batch_size + batch_left)]
+                inputs['pixel_values'] = inputs['pixel_values'] *\
+                      image_binary_masks[(batch_index * batch_size):(batch_index * batch_size + batch_left)]
             else:
                 break 
             with torch.no_grad():
-                inputs = {key: tensor.to(self.model.device) for key, tensor in inputs.items()}
-                outputs = self.model(**inputs)
+                outputs = self.model(**inputs.to(self.model.device))
             # take only the diagonal predictions - a naive approach
             outputs = torch.diagonal(outputs.logits_per_image).cpu()
             coalitions_outputs.append(outputs)
@@ -189,8 +187,9 @@ class VisionLanguageGame(Game):
         for batch_index_image in range(batch_iters_image + 1):
             coalitions_outputs_image = []
             if batch_index_image < batch_iters_image:
-                # store just the modified pixel_values for this batch
-                current_pixel_values = inputs_original['pixel_values'] * image_binary_masks[(batch_index_image * batch_size):((batch_index_image + 1) * batch_size)]
+                inputs_image = deepcopy(inputs_original)
+                inputs_image['pixel_values'] = inputs_image['pixel_values'] *\
+                      image_binary_masks[(batch_index_image * batch_size):((batch_index_image + 1) * batch_size)]
             elif batch_left_image > 0: # process last image batch (once)
                 inputs_image = self._processor_function([self.input_image] * batch_left_image, [self.input_text] * batch_size)
                 inputs_image['pixel_values'] = inputs_image['pixel_values'] *\
@@ -199,29 +198,22 @@ class VisionLanguageGame(Game):
                 break 
             for batch_index_text in range(batch_iters_text + 1):
                 if batch_index_text < batch_iters_text:
-                    inputs = {
-                        "input_ids": inputs_original["input_ids"],
-                        "attention_mask": text_attention_masks[(batch_index_text * batch_size):((batch_index_text + 1) * batch_size)],
-                        "pixel_values": current_pixel_values
-                    }
+                    inputs = deepcopy(inputs_image)
+                    inputs['attention_mask'] = text_attention_masks[(batch_index_text * batch_size):((batch_index_text + 1) * batch_size)]
                 elif batch_left_text > 0 and batch_index_image < batch_iters_image: # process last text batch in non-terminal image batch
-                    inputs = {
-                        "input_ids": inputs_left_text["input_ids"],
-                        "pixel_values": inputs_left_text["pixel_values"] * image_binary_masks[(batch_index_image * batch_size):((batch_index_image + 1) * batch_size)],
-                        "attention_mask": text_attention_masks[(batch_index_text * batch_size):(batch_index_text * batch_size + batch_left_text)]                    
-                    }                  
+                    inputs = deepcopy(inputs_left_text)
+                    inputs['pixel_values'] = inputs['pixel_values'] *\
+                        image_binary_masks[(batch_index_image * batch_size):((batch_index_image + 1) * batch_size)]
+                    inputs['attention_mask'] = text_attention_masks[(batch_index_text * batch_size):(batch_index_text * batch_size + batch_left_text)]                    
                 elif batch_left_text > 0 and batch_left_image > 0: # process last text and image batch (once)
-                    inputs_last = self._processor_function([self.input_image] * batch_left_image, [self.input_text] * batch_left_text)
-                    inputs = {
-                        "input_ids": inputs_last["input_ids"],
-                        "pixel_values": inputs_last["pixel_values"] * image_binary_masks[(batch_index_image * batch_size):(batch_index_image * batch_size + batch_left_image)],
-                        "attention_mask": text_attention_masks[(batch_index_text * batch_size):(batch_index_text * batch_size + batch_left_text)]                 
-                    }                
+                    inputs = self._processor_function([self.input_image] * batch_left_image, [self.input_text] * batch_left_text)
+                    inputs['pixel_values'] = inputs['pixel_values'] *\
+                        image_binary_masks[(batch_index_image * batch_size):(batch_index_image * batch_size + batch_left_image)]
+                    inputs['attention_mask'] = text_attention_masks[(batch_index_text * batch_size):(batch_index_text * batch_size + batch_left_text)]                 
                 else:
                     break
                 with torch.no_grad():
-                    inputs = {key: tensor.to(self.model.device) for key, tensor in inputs.items()}
-                    outputs = self.model(**inputs)
+                    outputs = self.model(**inputs.to(self.model.device))
                 outputs = outputs.logits_per_image.cpu()
                 coalitions_outputs_image.append(outputs)
             coalitions_outputs.append(torch.concat(coalitions_outputs_image, axis=1))
