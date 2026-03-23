@@ -1,11 +1,11 @@
 {
   "object_name": "InteractionValues",
   "data_type": "interaction_values",
-  "version": "1.4.2.dev17+gec73ba974",
+  "version": "1.4.2.dev19+g747f1f328",
   "created_from": null,
   "description": null,
   "parameters": {},
-  "timestamp": "2026-03-18T15:18:23.338577+00:00Z",
+  "timestamp": "2026-03-23T22:01:27.400025+00:00Z",
   "metadata": {
     "n_players": 71,
     "index": "FBII",
