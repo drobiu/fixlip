@@ -5,6 +5,7 @@ import numpy as np
 import scipy as sp
 
 from . import sampler
+from .utils import nary_outer_einsum_52
 
 
 class FIxLIP:
@@ -14,8 +15,9 @@ class FIxLIP:
     def __init__(
             self, 
             n_players=None, 
-            n_players_image=None,
-            n_players_text=None,
+            n_players_modalities=None,
+            # n_players_image=None,
+            # n_players_text=None,
             mode="banzhaf",
             p=0.5, 
             max_order=2, 
@@ -26,13 +28,12 @@ class FIxLIP:
         self.sparse_regression = sparse_regression
         self.is_crossmodal = False
 
-        if n_players_image and n_players_text:
+        if len(n_players_modalities.keys()) > 1:
             if mode.lower() == "shapley":
                 raise ValueError("approximate_crossmodal() is not available for mode 'Shapley'")
             self.is_crossmodal = True
-            n_players = n_players_image + n_players_text
-            self.n_players_image = n_players_image
-            self.n_players_text = n_players_text
+            n_players = sum([n for mod, n in n_players_modalities.items()])
+            self.n_players_modalities = n_players_modalities
 
         if mode.lower() == "banzhaf":
             # Sample using uniform weights
@@ -50,27 +51,20 @@ class FIxLIP:
         else:
             raise ValueError("`mode` should be either 'Banzhaf' or 'Shapley'.")
         
-        if n_players_image and n_players_text:
-            self.sampler_image = sampler.CoalitionSampler(
-                n_players=n_players_image, 
-                sampling_weights=np.array([
-                    sp.special.binom(n_players_image, k) * (p ** k) * ((1 - p) ** (n_players_image - k))\
-                          for k in range(n_players_image + 1)
-                ]), 
-                enforce_empty_full=enforce_empty_full,
-                pairing_trick=False, 
-                random_state=random_state
-            )
-            self.sampler_text = sampler.CoalitionSampler(
-                n_players=n_players_text, 
-                sampling_weights=np.array([
-                    sp.special.binom(n_players_text, k) * (p ** k) * ((1 - p) ** (n_players_text - k))\
-                          for k in range(n_players_text + 1)
-                ]), 
-                enforce_empty_full=enforce_empty_full,
-                pairing_trick=False, 
-                random_state=random_state
-            )
+        self.samplers = {}
+        
+        if len(n_players_modalities.keys()) > 1:
+            for mod, n_players_mod in self.n_players_modalities.items():
+                self.samplers[mod] = sampler.CoalitionSampler(
+                    n_players=n_players_mod, 
+                    sampling_weights=np.array([
+                        sp.special.binom(n_players_mod, k) * (p ** k) * ((1 - p) ** (n_players_mod - k))\
+                            for k in range(n_players_mod + 1)
+                    ]), 
+                    enforce_empty_full=enforce_empty_full,
+                    pairing_trick=False, 
+                    random_state=random_state
+                )
         elif n_players is None:
             raise ValueError("Pass either `n_players` for basic usage or "+\
                              "pass `n_players_image` and `n_players_text` for crossmodal usage.")
@@ -177,8 +171,7 @@ class FIxLIP:
         self, 
         game, 
         budget=None, 
-        budget_image=None, 
-        budget_text=None, 
+        modality_budgets=None, 
         interaction_lookup=None, 
         time_game=False, 
         approximation_type="original",
@@ -193,42 +186,50 @@ class FIxLIP:
         if budget is not None:
             if budget < 4:
                 raise ValueError("`budget` should be at least 4.")
-            budget_image, budget_text = self.split_budget(budget)
-        elif budget_image is None or budget_text is None:
-            raise ValueError("Pass either `budget` or `budget_image` and `budget_text`.")
+            modality_budgets = self.split_budget(budget, game.modality_types)
+            budget = np.prod([b for mod, b in modality_budgets.items()])
+        elif modality_budgets is None:
+            raise ValueError("Pass either `budget` or `modality_budgets`.")
         else:
-            budget = budget_image * budget_text
+            budget = np.prod([b for mod, b in modality_budgets.items()])
+
         # sample coalitions from both modalities
-        self.sampler_image.sample(budget_image)
-        self.sampler_text.sample(budget_text)
+        [self.samplers[mod].sample(modality_budgets[mod]) for mod in self.samplers]
+
         # evaluate coalition values efficiently with _crossmodal (un-normalized game call)
         if time_game:
             self.time_game_start = time.time()
         coalition_values_crossmodal = game.value_function_crossmodal(
-            coalitions_image=self.sampler_image.coalitions_matrix,
-            coalitions_text=self.sampler_text.coalitions_matrix
+            {mod: self.samplers[mod].coalitions_matrix for mod in self.samplers}
         )
         if time_game:
             self.time_game_end = time.time()
         coalition_values_crossmodal = coalition_values_crossmodal - game.normalization_value
         # reshape inputs to aggregate()
         coalition_values = coalition_values_crossmodal.reshape(-1)
-        coalitions_matrix = np.concatenate([
-            np.repeat(self.sampler_image.coalitions_matrix, budget_text, axis=0), 
-            np.tile(self.sampler_text.coalitions_matrix, (budget_image, 1))
-        ], axis=1)
+        coalitions_matrix = []
+        repeat_factor = budget
+        tile_factor = 1
+        for i, mod in enumerate(modality_budgets):
+            coalition = self.samplers[mod].coalitions_matrix
+
+            E = np.repeat(coalition, repeat_factor, axis=0)
+            E = np.tile(E, (tile_factor, 1))
+
+            repeat_factor /= modality_budgets[mod]
+            tile_factor *= modality_budgets[mod]
+
+            coalitions_matrix.append(E)
+            
+        coalitions_matrix = np.concatenate(coalitions_matrix, axis=1)
         if approximation_type == "original":
             # set kernel weights for image and text using banzhaf
-            kernel_weights_image = np.array([self.p ** k * ((1 - self.p) ** (self.n_players_image - k)) \
-                                                for k in range(self.n_players_image + 1)])
-            kernel_weights_text = np.array([self.p ** k * ((1 - self.p) ** (self.n_players_text - k)) \
-                                                for k in range(self.n_players_text + 1)])
-            image_regression_weights = get_regression_weights(self.sampler_image, kernel_weights_image)
-            text_regression_weights = get_regression_weights(self.sampler_text, kernel_weights_text)
-            regression_weights = np.outer(
-                image_regression_weights,
-                text_regression_weights
-            ).reshape(-1)
+            weights = []
+            for mod, n_players in self.n_players_modalities.items():
+                kernel_weights = np.array([self.p ** k * ((1 - self.p) ** (n_players - k)) \
+                                                for k in range(n_players + 1)])
+                regression_weights = get_regression_weights(self.samplers[mod], kernel_weights)
+            regression_weights = nary_outer_einsum_52(*weights).reshape(-1)
             # aggregate coalition values with aggregate()
             interaction_values = self.aggregate(
                 coalition_matrix=coalitions_matrix, 
@@ -315,7 +316,7 @@ class FIxLIP:
 
     #:# ---------- utility functions ---------- #:#
 
-    def split_budget(self, budget):
+    def split_budget_(self, budget, modality_types):
         """
         Heuristic to choose a reasonable budget split.
         """
@@ -330,6 +331,37 @@ class FIxLIP:
             budget_image = int(np.min([2 ** self.n_players_image, budget_image]))
             budget_text = int(budget / budget_image)    
         return budget_image, budget_text
+    
+    def split_budget(self, budget, modality_types):
+        """
+        Split budget across an arbitrary number of modalities.
+
+        Returns:
+            dict: {modality_name: modality_budget}
+        """
+
+        n_modalities = len(modality_types)
+
+        player_counts = {
+            mod: self.n_players_modalities[mod]
+            for mod in modality_types
+        }
+
+        prod_players = np.prod(list(player_counts.values()))
+
+        c = (budget / prod_players) ** (1 / n_modalities)
+
+        modality_budgets = {}
+
+        for mod, n_players in player_counts.items():
+            b = int(np.ceil(max(4, c * n_players)))
+
+            # Can't sample more coalitions than exist
+            b = min(2 ** n_players, b)
+
+            modality_budgets[mod] = b
+
+        return modality_budgets
 
 
 def solve_regression(X: np.ndarray, y: np.ndarray, kernel_weights: np.ndarray, sparse_regression=False) -> np.ndarray:

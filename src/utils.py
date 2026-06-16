@@ -442,3 +442,11 @@ def get_conditioned_interactions(iv: InteractionValues, player: int, divide: boo
         estimation_budget=iv.estimation_budget,
         baseline_value=iv.baseline_value,
     )
+
+
+def nary_outer_einsum_52(*vectors):
+    import string
+    subscripts = string.ascii_letters[:len(vectors)]
+    subscripts = ','.join(subscripts) + '->' + subscripts
+    # expands to `numpy.einsum('a,b,c,d,e->abcde', v[0], v[1], v[2], v[3], v[4])`
+    return np.einsum(subscripts, *vectors)

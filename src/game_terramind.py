@@ -1,4 +1,5 @@
 from copy import deepcopy
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -9,9 +10,14 @@ from shapiq import Game
 
 class VisionLanguageGame(Game):
     """
-    A general interface for Huggingface CLIP, SigLIP
+    An interface for the TerraMind model
+
+    model: model to be explained
+    inputs: dict(str, torch.Tensor) mapping modality name to its corresponding input
+    modalities: dict(str, str) mapping modality name consistent with inputs to the modality type, either text or image
+    mask_names: dict(str, str) mapping modality name to the name of the mask to be used for that modality in the model forward function (if applicable)
     """
-    def __init__(self, model, input_image, input_text, batch_size=1, grid_step=2, verbose=False, cl=1):
+    def __init__(self, model, inputs, modalities, mask_names=None, batch_size=1, grid_step=2, verbose=False, cl=1):
         self.model = model
         self.model_type = "terramind" 
 
@@ -20,31 +26,39 @@ class VisionLanguageGame(Game):
         # self.outs = []
         # self.masks = []
         # self.vals = []
+        self.inputs = {k: deepcopy(v) for k, v in inputs.items()}
+        self.modality_types = modalities
+        self.mask_names = mask_names if mask_names is not None else {modality: modality for modality in modalities.keys()}
+        self.mask_to_input_names = {v: k for k, v in self.mask_names.items()}
+        assert inputs.keys() == modalities.keys() == self.mask_names.keys(), "Keys of inputs, modalities, and mask_names must match"
+        self.modality_names = inputs.keys()
+
+        self.n_image_modalities = sum([1 for modality in modalities.values() if modality == 'image'])
+        self.n_text_modalities = sum([1 for modality in modalities.values() if modality == 'text'])
 
         self.device = next(model.parameters()).device
 
-        self.input_image = deepcopy(input_image)
-        self.input_text = deepcopy(input_text)
         self.batch_size = batch_size
 
-        self.inputs_original = self.form_and_repeat_input(batch_size, batch_size)
+        # self.inputs_original = self.form_and_repeat_input(batch_size, batch_size)
 
-        self.inputs = self._processor_function(self.inputs_original)
+        self.inputs_tokenized = self._processor_function(self.inputs)
 
         self.image_size = 224
         self.patch_size = 16
-        self.n_channels = 13
+        # self.n_channels = 13
         self.grid_size = self.image_size // self.patch_size
         self.grid_step = grid_step
         self.true_grid_size = self.grid_size // self.grid_step
-        self.n_players_image = self.true_grid_size ** 2 
+        self.n_players_image = {mod: self.true_grid_size ** 2 for mod, typ in self.modality_types.items() if typ == 'image'}
 
-        # remove the bos and eos tokens
-        self.n_players_text = (self.inputs['coords']['tensor'][0] != 3).count_nonzero().item()
+        # remove the eos token
+        self.n_players_text = {mod: (self.inputs_tokenized[self.mask_names[mod]]['tensor'][0] != 3).count_nonzero().item() for mod, typ in self.modality_types.items() if typ == 'text'}
 
+        self.n_players = sum(self.n_players_image.values()) + sum(self.n_players_text.values())
 
         # get the normalization value
-        coalitions = np.zeros((2, self.n_players_image + self.n_players_text), dtype=bool)
+        coalitions = np.zeros((2, self.n_players), dtype=bool)
 
         coalitions[1, :] = True
         game_output = self.value_function(coalitions=coalitions)
@@ -55,7 +69,7 @@ class VisionLanguageGame(Game):
             print(f"Similarly of the Image and Text: {self.full_value} (empty_value={self.empty_value})")
 
         super().__init__(
-            n_players=self.n_players_image + self.n_players_text,
+            n_players=self.n_players,
             normalize=True,
             normalization_value=self.empty_value,
         )
@@ -77,145 +91,161 @@ class VisionLanguageGame(Game):
         """
         if batch_size is None:
             batch_size = self.batch_size 
+        
         n_coalitions = coalitions.shape[0]
-        coalitions_image = torch.from_numpy(coalitions[:, :self.n_players_image]).to(self.device)
-        coalitions_text = torch.from_numpy(coalitions[:, self.n_players_image:])
+        modality_masks = {}
+        i = 0
 
-        text_attention_masks = torch.cat((
-            # torch.ones(n_coalitions, 1), 
-            coalitions_text, 
-            torch.ones(n_coalitions, 1)), 
-            axis=1
-        ).int().to(self.device)
-
-        image_attention_mask = self._expand_binary_mask(coalitions_image)
+        for modality in self.modality_types:
+            modality_type = self.modality_types[modality]
+            if modality_type == 'text':
+                coalitions_text = torch.from_numpy(coalitions[:, i:i+self.n_players_text[modality]])
+                i += self.n_players_text[modality]
+                modality_masks[modality] = torch.cat((
+                    coalitions_text, 
+                    torch.ones(n_coalitions, 1)), 
+                    axis=1
+                ).int().to(self.device)
+            elif modality_type == 'image':
+                coalitions_image = torch.from_numpy(coalitions[:, i:i+self.n_players_image[modality]]).to(self.device)
+                i += self.n_players_image[modality]
+                modality_masks[modality] = self._expand_binary_mask(coalitions_image)
 
         #:# batch processing
         batch_iters = n_coalitions // batch_size
         batch_left = n_coalitions % batch_size
         coalitions_outputs = []
         for batch_index in range(batch_iters + 1):
-            inputs = deepcopy(self.form_and_repeat_input(batch_size, batch_size))
-            if batch_index < batch_iters:
-                mask_coord = text_attention_masks[(batch_index * batch_size):((batch_index + 1) * batch_size)]
-                mask_img = image_attention_mask[(batch_index * batch_size):((batch_index + 1) * batch_size)]
-            
-            elif batch_left > 0: # process last batch (once)
-                inputs = deepcopy(self.form_and_repeat_input(batch_left, batch_left))
-                mask_coord = text_attention_masks[(batch_index * batch_size):(batch_index * batch_size + batch_left)]
-                mask_img = image_attention_mask[(batch_index * batch_size):(batch_index * batch_size + batch_left)]
-            else:
-                break 
-            mask = {'untok_sen2l1c@224': mask_img, 'coords': mask_coord}
+            mask = {}
+            for i, modality in enumerate(self.modality_types):
+                if batch_index < batch_iters:
+                    mask[self.mask_names[modality]] = modality_masks[modality][(batch_index * batch_size):((batch_index + 1) * batch_size)]
+                    inputs = deepcopy(self.form_and_repeat_input(mask))
+
+                elif batch_left > 0: # process last batch (once)
+                    mask[self.mask_names[modality]] = modality_masks[modality][(batch_index * batch_size):(batch_index * batch_size + batch_left)]
+                    inputs = deepcopy(self.form_and_repeat_input(mask))
+                else:
+                    break 
             with torch.no_grad():
                 outputs = self.model.forward(inputs, mask=mask)
 
-            # outputs = outputs['LULC'].mean((2, 3))[:, self.cl].cpu()
+            outputs = outputs['LULC'].mean((2, 3))[:, self.cl].cpu()
             # outputs = (outputs['LULC'].argmax(axis=1) == self.cl).to(torch.float).mean((1, 2)).cpu()
             # outputs = outputs['LULC'][:, :, 100:150, 100:150].mean((1, 2))[:, self.cl].cpu()
-            outputs = outputs['LULC'].softmax(1)[:, self.cl].mean((1, 2)).cpu()
+            # outputs = outputs['LULC'].softmax(1)[:, self.cl].mean((1, 2)).cpu()
             coalitions_outputs.append(outputs)
         coalitions_outputs = torch.concat(coalitions_outputs)
 
         return coalitions_outputs.numpy()
 
 
-    def value_function_crossmodal(self, coalitions_image, coalitions_text, batch_size=None):
+    def value_function_crossmodal(self, modality_coalitions, batch_size=None):
         """ Efficient value function
-        Input: Coalitions of the game as two boolean np.arrays of shapes 
-            (n_coalitions_image, n_players_image) and (n_coalitions_text, n_players_text).
-        Output: Model outputs for the coalitions of shape (n_coalitions_image, n_coalitions_text)."
+        Input: Coalitions of the game as dict of boolean np.arrays of shapes 
+            (n_coalitions, n_players).
+        Output: Model outputs for the coalitions of shape (n_coalitions_0, ..., n_coalitions_n)."
         """
         if batch_size is None:
             batch_size = self.batch_size 
-        n_coalitions_image = coalitions_image.shape[0]
-        n_coalitions_text = coalitions_text.shape[0]
+        
+        modality_masks = {}
+        modality_batches = {}
 
-        text_attention_masks = torch.cat((
-            # torch.ones(n_coalitions_text, 1), 
-            torch.from_numpy(coalitions_text), torch.ones(n_coalitions_text, 1)), 
-            axis=1
-        ).int().to(self.device)
+        for mod, coalitions in modality_coalitions.items():
+            n_coalitions = coalitions.shape[0]
+            modality_type = self.modality_types[mod]
+            if modality_type == 'text':
+                coalitions_mod = torch.from_numpy(coalitions)
+                modality_masks[mod] = torch.cat((
+                    coalitions_mod, 
+                    torch.ones(n_coalitions, 1)), 
+                    axis=1
+                ).int().to(self.device)
 
-        coalitions_image = torch.from_numpy(coalitions_image).to(self.device)
-        image_attention_mask = self._expand_binary_mask(coalitions_image)
+            elif modality_type == 'image':
+                coalitions_mod = torch.from_numpy(coalitions).to(self.device)
+                modality_masks[mod] = self._expand_binary_mask(coalitions_mod)
 
-        #:# batch processing
-        batch_iters_image = n_coalitions_image // batch_size
-        batch_iters_text = n_coalitions_text // batch_size
-        batch_left_image = n_coalitions_image % batch_size
-        batch_left_text = n_coalitions_text % batch_size
+            batch_iters = n_coalitions // batch_size
+            batch_left = n_coalitions % batch_size
 
-        coalitions_outputs = []
-        for batch_index_image in tqdm(range(batch_iters_image + 1)):
-            coalitions_outputs_image = []
-            inputs = deepcopy(self.form_and_repeat_input(batch_size, batch_size))
-            if batch_index_image < batch_iters_image:
-                mask_img = image_attention_mask[(batch_index_image * batch_size):((batch_index_image + 1) * batch_size)]
-            
-            elif batch_left_image > 0: # process last image batch (once)
-                inputs = deepcopy(self.form_and_repeat_input(batch_left_image, batch_size))
-                mask_img = image_attention_mask[(batch_index_image * batch_size):(batch_index_image * batch_size + batch_left_image)]
-
-            else:
-                break 
-            for batch_index_text in range(batch_iters_text + 1):
-                if batch_index_text < batch_iters_text:
-                    mask_coord = text_attention_masks[(batch_index_text * batch_size):((batch_index_text + 1) * batch_size)]
-                
-                elif batch_left_text > 0 and batch_index_image < batch_iters_image: # process last text batch in non-terminal image batch
-                    inputs = deepcopy(self.form_and_repeat_input(batch_size, batch_left_text))
-                    mask_img = image_attention_mask[(batch_index_image * batch_size):((batch_index_image + 1) * batch_size)]
-                    mask_coord = text_attention_masks[(batch_index_text * batch_size):(batch_index_text * batch_size + batch_left_text)]                    
-                
-                elif batch_left_text > 0 and batch_left_image > 0: # process last text and image batch (once)
-                    inputs = deepcopy(self.form_and_repeat_input(batch_left_image, batch_left_text))
-                    mask_img = image_attention_mask[(batch_index_image * batch_size):(batch_index_image * batch_size + batch_left_image)]
-                    mask_coord = text_attention_masks[(batch_index_text * batch_size):(batch_index_text * batch_size + batch_left_text)]                 
-                
+            batches = []
+            for batch_i in tqdm(range(batch_iters + 1)):            
+                if batch_i < batch_iters:
+                    batches.append(modality_masks[mod][(batch_i * batch_size):((batch_i + 1) * batch_size)])
+                elif batch_left > 0:
+                    batches.append(modality_masks[mod][(batch_i * batch_size):(batch_i * batch_size + batch_left)])
                 else:
                     break
-                mask = {'untok_sen2l1c@224': mask_img, 'coords': mask_coord}
-                with torch.no_grad():
-                    outputs = self.output_combinations(inputs, mask)
-                coalitions_outputs_image.append(outputs)
 
-            coalitions_outputs.append(torch.concat(coalitions_outputs_image, axis=1))
-        coalitions_outputs = torch.concat(coalitions_outputs, axis=0)
-        return coalitions_outputs.numpy()
+            modality_batches[mod] = {
+                'iters': batch_iters,
+                'left': batch_left,
+                'batches': batches
+            }
+
+        repeat = 1
+        tile = np.prod([len(b['batches']) for mod, b in modality_batches.items()])
+
+
+        print([(mod, b) for mod, b in modality_batches.items()])
+
+        extended = defaultdict(list)
+        for mod, b in modality_batches.items():
+            batches = b['batches']
+            tile = tile // len(batches)
+            tiled = []
+            for el in batches:
+                tiled.extend([el] * tile)
+            extended[mod].append(tiled * repeat)
+            repeat *= len(batches)
+
+        
+        print('extended', [(mod, len(b[0]), b[0]) for mod, b in extended.items()])
+
+        outputs = np.zeros(tuple(modality_coalitions[mod].shape[0] for mod in self.modality_types), dtype=float)
+
+        for i, idxs in enumerate(np.ndindex(tuple(np.ceil(np.array(outputs.shape) / batch_size).astype(int)))):
+            mask = {self.mask_names[mod]: extended[mod][i] for mod in extended}
+            out_prod = self.output_combinations(mask)
+            slices = tuple(
+                slice(idx * batch_size, (idx + 1) * batch_size)
+                for idx in idxs
+            )
+            outputs[slices] = out_prod
+
+        return outputs.numpy()
     
 
-    def output_combinations(self, inputs, mask, batch_size=16):
-
-        inputs_image = inputs['S2L1C']
-        inputs_text = inputs['Coords']
-
-        n_inputs_image = inputs_image.shape[0]
-        n_inputs_text = inputs_text.shape[0]
-
+    def output_combinations(self, modality_masks, batch_size=16):
         # Generate a matrix of outputs of each combination of inputs in the sen2l1c and coords modalities
         # Batch it using batch_size
         
         # 1. create a list of inputs (product of all image and text inputs)
         # 2. batch it and forward through the model using model.forward(inputs, mask=mask))
         # 3. concatenate and return
+        print([(mod, b[0].shape) for mod, b in modality_masks.items()])
 
-        prod_imgs, prod_coords, prod_img_masks, prod_coord_masks = [], [], [], []
+        combined_input = defaultdict(list)
+        combined_masks = defaultdict(list)
 
-        for i in range(n_inputs_image):
-            for j in range(n_inputs_text):
-                prod_imgs.append(inputs_image[i:i+1])
-                prod_img_masks.append(mask['untok_sen2l1c@224'][i:i+1])
-                prod_coords.append(inputs_text[j:j+1])
-                prod_coord_masks.append(mask['coords'][j:j+1])
+        mask_sizes = [len(mask) for _, mask in modality_masks.items()]
 
+        for idxs in np.ndindex(tuple(mask_sizes)):
+            for i, mod in enumerate(modality_masks):
+                combined_input[mod].append(self.inputs[self.mask_to_input_names[mod]])
+                combined_masks[mod].append(modality_masks[mod][idxs[i]])
+        print([(mod, b[0].shape) for mod, b in combined_input.items()])
+        print([(mod, b[0].shape) for mod, b in combined_masks.items()])
 
         outputs = []
 
-        for i in range(0, len(prod_imgs), batch_size):
-            batch_img, batch_coord, batch_img_mask, batch_coord_mask = prod_imgs[i:i+batch_size], prod_coords[i:i+batch_size], prod_img_masks[i:i+batch_size], prod_coord_masks[i:i+batch_size]
-            batch_inputs = deepcopy({"S2L1C": torch.concat(batch_img, axis=0), "Coords": torch.concat(batch_coord, axis=0)})
-            batch_masks = deepcopy({"untok_sen2l1c@224": torch.concat(batch_img_mask, axis=0), "coords": torch.concat(batch_coord_mask, axis=0)})
+        for i in range(0, np.prod(mask_sizes), batch_size):
+            batch_inputs = deepcopy({self.mask_to_input_names[mod]: torch.concat(combined_input[mod][i:i+batch_size], axis=0) for mod in modality_masks})
+            batch_masks = deepcopy({mod: torch.concat(combined_masks[mod][i:i+batch_size], axis=0) for mod in modality_masks})
+            print([(mod, b.shape) for mod, b in batch_inputs.items()])
+            print([(mod, b.shape) for mod, b in batch_masks.items()])
             with torch.no_grad():
                 batch_outputs = self.model.forward(batch_inputs, mask=batch_masks)
             # batch_outputs = batch_outputs.logits_per_image.cpu()
@@ -223,13 +253,13 @@ class VisionLanguageGame(Game):
             # self.masks.append(batch_masks)
 
             # batch_outputs = batch_outputs['LULC'][:, :, 100:150, 100:150].mean((1, 2))[:, self.cl, None].cpu()
-            # batch_outputs = batch_outputs['LULC'].mean((2, 3))[:, self.cl, None].cpu()
+            batch_outputs = batch_outputs['LULC'].mean((2, 3))[:, self.cl, None].cpu()
             # batch_outputs = (batch_outputs['LULC'].argmax(axis=1) == self.cl).to(torch.float).mean((1, 2)).cpu()
-            batch_outputs = batch_outputs['LULC'].softmax(1).mean((2, 3))[:, self.cl, None].cpu()
+            # batch_outputs = batch_outputs['LULC'].softmax(1).mean((2, 3))[:, self.cl, None].cpu()
             # self.vals.append(batch_outputs)
             outputs.append(batch_outputs)
         outputs = torch.concat(outputs, axis=0)
-        return outputs.reshape(n_inputs_image, n_inputs_text, 1)
+        return outputs.reshape(*mask_sizes, 1)
     
 
     def output_combinations_tokenized(self, inputs, mask, batch_size=16):
@@ -337,5 +367,14 @@ class VisionLanguageGame(Game):
         return binary_masks
     
 
-    def form_and_repeat_input(self, n_image, n_text):
-        return {'S2L1C': self.input_image.repeat(n_image, 1, 1, 1), 'Coords': self.input_text.repeat(n_text, 1)}
+    def form_and_repeat_input(self, modality_masks):
+        out = {}
+        for mod, mask in modality_masks.items():
+            n_coalitions = mask.shape[0]
+            inp_mod_name = self.mask_to_input_names[mod]
+            if self.modality_types[inp_mod_name] == 'text':
+                out[inp_mod_name] = self.inputs[inp_mod_name].repeat(n_coalitions, 1)
+            elif self.modality_types[inp_mod_name] == 'image':
+                out[inp_mod_name] = self.inputs[inp_mod_name].repeat(n_coalitions, 1, 1, 1)
+
+        return out
