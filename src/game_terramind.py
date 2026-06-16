@@ -155,6 +155,7 @@ class VisionLanguageGame(Game):
         for mod, coalitions in modality_coalitions.items():
             n_coalitions = coalitions.shape[0]
             modality_type = self.modality_types[mod]
+
             if modality_type == 'text':
                 coalitions_mod = torch.from_numpy(coalitions)
                 modality_masks[mod] = torch.cat((
@@ -191,20 +192,20 @@ class VisionLanguageGame(Game):
 
         print([(mod, b) for mod, b in modality_batches.items()])
 
-        extended = defaultdict(list)
+        extended = {}
         for mod, b in modality_batches.items():
             batches = b['batches']
             tile = tile // len(batches)
             tiled = []
             for el in batches:
                 tiled.extend([el] * tile)
-            extended[mod].append(tiled * repeat)
+            extended[mod] = (tiled * repeat)
             repeat *= len(batches)
 
         
         print('extended', [(mod, len(b[0]), b[0]) for mod, b in extended.items()])
 
-        outputs = np.zeros(tuple(modality_coalitions[mod].shape[0] for mod in self.modality_types), dtype=float)
+        outputs = np.zeros(tuple([*[modality_coalitions[mod].shape[0] for mod in self.modality_types], 1]), dtype=float)
 
         for i, idxs in enumerate(np.ndindex(tuple(np.ceil(np.array(outputs.shape) / batch_size).astype(int)))):
             mask = {self.mask_names[mod]: extended[mod][i] for mod in extended}
@@ -215,7 +216,7 @@ class VisionLanguageGame(Game):
             )
             outputs[slices] = out_prod
 
-        return outputs.numpy()
+        return outputs
     
 
     def output_combinations(self, modality_masks, batch_size=16):
@@ -235,7 +236,7 @@ class VisionLanguageGame(Game):
         for idxs in np.ndindex(tuple(mask_sizes)):
             for i, mod in enumerate(modality_masks):
                 combined_input[mod].append(self.inputs[self.mask_to_input_names[mod]])
-                combined_masks[mod].append(modality_masks[mod][idxs[i]])
+                combined_masks[mod].append(modality_masks[mod][idxs[i]].unsqueeze(0))
         print([(mod, b[0].shape) for mod, b in combined_input.items()])
         print([(mod, b[0].shape) for mod, b in combined_masks.items()])
 
