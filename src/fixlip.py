@@ -212,11 +212,12 @@ class FIxLIP:
         tile_factor = 1
         for i, mod in enumerate(modality_budgets):
             coalition = self.samplers[mod].coalitions_matrix
+            
+            repeat_factor /= modality_budgets[mod]
 
             E = np.repeat(coalition, repeat_factor, axis=0)
             E = np.tile(E, (tile_factor, 1))
 
-            repeat_factor /= modality_budgets[mod]
             tile_factor *= modality_budgets[mod]
 
             coalitions_matrix.append(E)
@@ -229,6 +230,7 @@ class FIxLIP:
                 kernel_weights = np.array([self.p ** k * ((1 - self.p) ** (n_players - k)) \
                                                 for k in range(n_players + 1)])
                 regression_weights = get_regression_weights(self.samplers[mod], kernel_weights)
+                weights.append(regression_weights)
             regression_weights = nary_outer_einsum_52(*weights).reshape(-1)
             # aggregate coalition values with aggregate()
             interaction_values = self.aggregate(

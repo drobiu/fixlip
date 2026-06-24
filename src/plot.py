@@ -237,6 +237,7 @@ def interactions_to_color(
 def interactions_to_heatmap(
     iv: shapiq.InteractionValues,
     img: Image.Image | np.ndarray,
+    indices: list[tuple[int, ...]],
     colors: dict[tuple[int, ...], tuple[float, float, float, float]] | None = None,
 ) -> Image.Image:
     """Turns the InteractionValues into a heatmap."""
@@ -249,16 +250,16 @@ def interactions_to_heatmap(
     max_abs_value = float(np.quantile(np.abs(iv.get_n_order(order=1).values), 0.99))
     # create the heatmap array
     heatmap = np.zeros((grid_size, grid_size, 4))
-    for i in range(iv.n_players):
+    for i, c_index in enumerate(indices):
         row = i // grid_size
         column = i % grid_size
         if colors is not None:
             # use the color from the dictionary
-            color_patch = colors[(i,)]
+            color_patch = colors[(c_index,)]
             alpha = color_patch[3]
             color = (*color_patch[:3], np.min([alpha, 1]))
         else:
-            score_patch = iv[(i,)]
+            score_patch = iv[(c_index,)]
             color_patch = value_to_color(score_patch)
             alpha = abs(score_patch) / max_abs_value
             color = (*color_patch, np.min([alpha, 1]))
@@ -347,9 +348,9 @@ def _get_line_lengths(
 
 
 def plot_image_and_text_together(
-    img: Image.Image | np.ndarray,
+    img: Image.Image | np.ndarray | dict,
     text: list[str],
-    image_players: list[int],
+    image_players: list[int] | dict[str, int] | dict[str, list[int]],
     iv: shapiq.InteractionValues,
     *,
     player_mask: set[int | tuple[int, ...]] | None = None,
@@ -371,78 +372,104 @@ def plot_image_and_text_together(
     normalize_jointly: bool = True,
     condition_on_player: int | None = None,
     show=True,
+    ax=None,
+    axes: list[plt.Axes] | None = None,  # ADDED: list of axes for modalities
 ) -> tuple[plt.Figure, plt.Axes, dict[int, tuple[float, float]]]:
-    """Adds and image (made out of n_players_image patches) and a text (made out of n_players_text
-    tokens) together onto a canvas. Returns the figure, axes and a dictionary of player indices to
-    their center coordinates.
+    """Extended: same behaviour as original but supports multiple image modalities.
 
-    Args:
-        img: The image to plot.
-        text: The text to plot.
-        image_players: The players that represent the image.
-        iv: The InteractionValues object containing the explanations.
-        player_mask: A set of players to plot. Missing players in set will be not plotted (i.e.
-            overlayed with black patch).
-        plot_heatmap: Whether to draw the heatmap onto the image.
-        fontsize: The font size of the text.
-        top_k: The number of top interactions to plot.
-        max_value: The maximum value to scale the colors and alpha values with. Defaults to None.
-            This is helpful to compare the interactions across different plots.
-        debug: Whether to print debug information.
-        figsize: The size of the figure. Defaults to (9, 10), which makes the image be square.
-        image_span: The span of the image in the y direction. Defaults to 0.9 (which makes the image
-            take up the top 90% of the figure). Note, that changing this value should also be done
-            together with the figsize parameter.
-        margin: The margin between the image and the text. Defaults to 0.5 (measured in lineheight).
-        margin_text: An optional left and right margin of the text, which can be used to center the
-            text manually (measured in percentage of the figure width). Defaults to no margin.
-        color_text: Whether to color the text according to the interaction values. Defaults to True.
-        plot_interactions: Whether to plot the interactions as connections between the players
-            (`True`) or not (`False`). Defaults to `False`.
-        normalize_jointly: Whether to normalize the color intensity of the text and image players
-            jointly (`True`) or independently (`False`). Defaults to `True`.
+    img can be:
+      - a single square numpy array (old behaviour),
+      - a dict mapping modality name -> numpy array.
 
-    Returns:
-        The figure, axes and a dictionary of player indices to their center coordinates.
+    image_players can be:
+      - old list[int] (old behaviour),
+      - dict[str, int] mapping modality -> number_of_patches (players are assigned sequentially
+        starting from 0),
+      - dict[str, list[int]] mapping modality -> explicit player indices.
+
+    Notes / behaviour:
+      - When image_players is a dict of counts we assume image player indices start at 0 and are
+        contiguous; text players are the remaining player indices in sorted order.
+      - When image_players is a dict of lists we use those indices directly.
+      - Each modality's image is arranged in its own square grid and the modalities are laid out
+        left-to-right inside the image area in proportion to their number of patches.
     """
 
     if condition_on_player is not None:
         iv = get_conditioned_interactions(iv, player=condition_on_player, divide=False)
 
-    iv_image = get_subset(iv, players=image_players)
+    # Normalize image_players to modality -> list[int]
+    if isinstance(image_players, dict):
+        modality_to_indices = {}
+        if all(isinstance(v, int) for v in image_players.values()):
+            # counts: assign sequential indices starting at 0
+            idx = 0
+            for mod, count in image_players.items():
+                modality_to_indices[mod] = list(range(idx, idx + count))
+                idx += count
+        else:
+            # assume lists
+            for mod, v in image_players.items():
+                modality_to_indices[mod] = list(v)
+    else:
+        # legacy single-modality list
+        modality_to_indices = {"_default": list(image_players)}
 
-    if plot_interactions and not normalize_jointly:
-        warnings.warn(f'`normalize_jointly` needs to be `True` when `plot_interactions` is `True`. Setting normalize_jointly to `True`.')
-        normalize_jointly = True
+    # Normalize img to modality->array
+    if isinstance(img, dict):
+        images = img
+    else:
+        # single image provided -> reuse for all modalities (legacy)
+        first_mod = list(modality_to_indices.keys())[0]
+        images = {mod: img for mod in modality_to_indices.keys()}
 
-    # get colors
+    # Collect global image player indices and counts
+    all_image_indices = []
+    for lst in modality_to_indices.values():
+        all_image_indices.extend(lst)
+    total_image_players = len(all_image_indices)
+    if total_image_players == 0:
+        raise ValueError("No image players provided.")
+
+    # Colors (joint or per-modality as fallback)
     if normalize_jointly:
         colors = interactions_to_color(iv, max_value=max_value)
     else:
-        colors = interactions_to_color(iv_image, max_value=max_value)
-        text_players = list(set(range(iv.n_players)) - set(image_players))
+        colors = {}
+        # per modality
+        for mod, indices in modality_to_indices.items():
+            iv_mod = get_subset(iv, players=indices)
+            colors_mod = interactions_to_color(iv_mod, max_value=max_value)
+            colors.update(colors_mod)
+        # text
+        text_players = sorted(set(range(iv.n_players)) - set(all_image_indices))
         iv_text = get_subset(iv, players=text_players, rename_players=False)
         colors_text = interactions_to_color(iv_text, max_value=max_value)
         colors.update(colors_text)
 
-    n_image_players = len(image_players)
-
-    image_size = img.shape[0]
-    grid_size = int(np.sqrt(n_image_players))
-    patch_size = int(image_size / grid_size)
-
-    word_dimensions = _get_word_dimensions(words=text, figsize=figsize, font_size=fontsize)
-    space_width = _get_word_dimensions(words=[" "], figsize=figsize, font_size=fontsize)[0][0]
-    line_height = _get_word_dimensions(words=["A"], figsize=figsize, font_size=fontsize)[0][1]
-
-    fig, ax = plt.subplots(figsize=figsize)
+    # Prepare figure / axis
+    if axes is not None:
+        # use provided axes for each modality; create a full-figure overlay axis for text/positions
+        fig = axes[0].figure
+        if not ax:
+            ax = fig.add_axes([0, 0, 1, 1], zorder=10)
+            ax.set_aspect('equal', adjustable='box')
+        else:
+            fig = ax.figure
+        # ensure modality axes are clean
+        for a in axes:
+            a.axis("off")
+    else:
+        if not ax:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.figure
     ax.axis('off')
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    # ax.set_xlim(0, 1)
+    # ax.set_ylim(0, 1)
 
-    # add image in the top image_span of the axis --------------------------------------------------
-    # add the image
-    image_aspect_ratio = 1  # Because image is square
+    # Compute overall image extent (centered as before)
+    image_aspect_ratio = 1  # images are assumed square
     fig_aspect_ratio = figsize[0] / figsize[1]
     image_height = image_span
     image_width = image_height * image_aspect_ratio / fig_aspect_ratio
@@ -452,112 +479,153 @@ def plot_image_and_text_together(
     bottom = 1 - image_span
     top = 1
     extent = (left, right, bottom, top)
-    if debug:
-        print("fig_aspect_ratio:", fig_aspect_ratio)
-        print("image_aspect_ratio:", image_aspect_ratio)
-        print("image_height:", image_height)
-        print("image_width:", image_width)
-        print("extent:", extent)
 
-    image_patch = ax.imshow(img, extent=extent, aspect='auto', zorder=0)
-    # add the explanation heatmap
-    if plot_heatmap:
-        heatmap = interactions_to_heatmap(iv=iv_image, img=img, colors=colors)
-        ax.imshow(heatmap, extent=extent, aspect='auto')
-    # mask out the players that are not in the player_mask
-    if player_mask is not None:
-        bw_colors = {}
-        for player in iv_image.interaction_lookup.keys():
-            if len(player) > 0 and (player in player_mask or player[0] in player_mask):
-                bw_colors[player] = (0.0, 0.0, 0.0, 0)
+    # draw a transparent background image to get window extents (used for text baseline)
+    sample_mod = next(iter(images))
+    sample_img = images[sample_mod]
+    image_patch = ax.imshow(sample_img, extent=extent, aspect=image_aspect_ratio, zorder=0, alpha=0.0)
+
+    # For each modality: compute relative width proportional to its number of patches and draw image + heatmap
+    left_current = left
+    positions: dict[int, tuple[float, float]] = {}
+    for mod_idx, (mod, indices) in enumerate(modality_to_indices.items()):
+        n_mod = len(indices)
+        # get iv subset for this modality (used by heatmap/masking)
+        iv_mod = get_subset(iv, players=indices)
+
+        if axes is not None:
+            # use the provided axis bbox for this modality (figure coords)
+            bbox = axes[mod_idx].get_position()
+            mod_left = bbox.x0
+            mod_right = bbox.x0 + bbox.width
+            mod_width = bbox.width
+            bottom_mod = bbox.y0
+            top_mod = bbox.y0 + bbox.height
+            image_patches = image_into_patches(images.get(mod, sample_img), n_mod)
+        else:
+            width_prop = n_mod / total_image_players
+            mod_width = image_width * width_prop
+            mod_left = left_current
+            mod_right = mod_left + mod_width
+            left_current = mod_right
+
+            img_mod = images.get(mod, sample_img)
+            # Create patches for modality image and overlay
+            image_patches = image_into_patches(img_mod, n_mod)
+            # grid_size for patch placement (legacy)
+            bbox = None
+            bottom_mod = bottom
+            top_mod = top
+
+        img_mod = images.get(mod, sample_img)
+
+        # draw modality image (either into its own axis or into the combined axis with extent)
+        if axes is not None:
+            img_ax = axes[mod_idx]
+            img_ax.imshow(img_mod, aspect=image_aspect_ratio, zorder=0)
+        else:
+            ax.imshow(img_mod, extent=(mod_left, mod_right, bottom_mod, top_mod), aspect='auto', zorder=0)
+
+        # heatmap for modality
+        if plot_heatmap:
+            heatmap = interactions_to_heatmap(iv=iv_mod, img=img_mod, colors=colors, indices=indices)
+            if axes is not None:
+                axes[mod_idx].imshow(heatmap, aspect=image_aspect_ratio, zorder=1)
             else:
-                if color_mask_white:
-                    bw_colors[player] = (1, 1, 1, opacity_white)
+                ax.imshow(heatmap, extent=(mod_left, mod_right, bottom_mod, top_mod), aspect='auto', zorder=1)
+
+        # mask players not in player_mask for this modality
+        if player_mask is not None:
+            bw_colors = {}
+            for player in iv_mod.interaction_lookup.keys():
+                if len(player) > 0 and (player in player_mask or player[0] in player_mask):
+                    bw_colors[player] = (0.0, 0.0, 0.0, 0)
                 else:
-                    bw_colors[player] = (0.5, 0.5, 0.5, 1)
-        bw_heatmap = interactions_to_heatmap(iv=iv_image, img=img, colors=bw_colors)
-        ax.imshow(bw_heatmap, extent=extent, aspect='auto')
+                    if color_mask_white:
+                        bw_colors[player] = (1, 1, 1, opacity_white)
+                    else:
+                        bw_colors[player] = (0.5, 0.5, 0.5, 1)
+            bw_heatmap = interactions_to_heatmap(iv=iv_mod, img=img_mod, colors=bw_colors)
+            if axes is not None:
+                axes[mod_idx].imshow(bw_heatmap, aspect=image_aspect_ratio, zorder=2)
+            else:
+                ax.imshow(bw_heatmap, extent=(mod_left, mod_right, bottom_mod, top_mod), aspect='auto', zorder=2)
 
-    # reset axis limits
-    plt.subplots_adjust(bottom=0, top=1, left=0, right=1)
+        # compute positions for each patch in this modality
+        grid_size = int(np.sqrt(n_mod))
+        for i, player_global in enumerate(indices):
+            col = i % grid_size
+            row = i // grid_size
+            # compute using the modality bounds (works for both provided axes (figure coords) and combined axis coords)
+            x = mod_left + (mod_width / grid_size) * (col + 0.5)
+            y = top_mod - ( (top_mod - bottom_mod) / grid_size ) * (row + 0.5)
+            positions[player_global] = (x, y)
+            if condition_on_player is not None and condition_on_player == player_global:
+                left_rectangle = x - (mod_width / grid_size) / 2
+                bottom_rectangle = y - ((top_mod - bottom_mod) / grid_size) / 2
+                width_rectangle = mod_width / grid_size
+                height_rectangle = (top_mod - bottom_mod) / grid_size
+                outline_rectangle = mpatches.Rectangle(
+                    (left_rectangle, bottom_rectangle),
+                    width_rectangle,
+                    height_rectangle,
+                    linewidth=6,
+                    edgecolor='black',
+                    facecolor='none',
+                    linestyle='--',
+                )
+                ax.add_patch(outline_rectangle)
 
-    positions = {}
-    if debug:
-        print("image_span:", image_span, "grid_size:", grid_size, "patch_size:", patch_size)
-    for player in range(n_image_players):
-        column = player % grid_size
-        row = player // grid_size
-        x = left + image_width / grid_size * (column + 0.5)
-        y = top - image_height / grid_size * (row + 0.5)
-        if debug:
-            print("image player:", {player}, "row:", row, "column:", column, "x:", x, "y:", y)
-        positions[len(positions)] = (x, y)
-        if condition_on_player is not None and condition_on_player == player:
-            # draw a rectangle around the image patch
-            left_rectangle = x - image_width / grid_size / 2
-            bottom_rectangle = y - image_height / grid_size / 2
-            width_rectangle = image_width / grid_size
-            height_rectangle = image_height / grid_size
-            outline_rectangle = mpatches.Rectangle(
-                (left_rectangle, bottom_rectangle),
-                width_rectangle,
-                height_rectangle,
-                linewidth=6,
-                edgecolor='black',
-                facecolor='none',
-                linestyle='--',
-            )
-            ax.add_patch(outline_rectangle)
+    # compute conversion and text baseline using drawn (invisible) image_patch
+    x0, y0, width_px, height_px = image_patch.get_window_extent().bounds
+    conversion_factor = figsize[0] * 100
+    space_width = _get_word_dimensions(words=["____"], figsize=figsize, font_size=fontsize)[0][0]
+    line_height = _get_word_dimensions(words=["A"], figsize=figsize, font_size=fontsize)[0][1]
 
-    x0, y0, width, height = image_patch.get_window_extent().bounds
-    x1, y1 = x0 + width, y0 + height
-    if debug:
-        print(f"x0: {x0}, y0: {y0}, x1: {x1}, y1: {y1}")
-
-    # compute the line starts and ends -------------------------------------------------------------
-    x0 = 0
-    x1 = figsize[0] * 100
+    # compute line starts/ends in same way as before
+    x0_conv = 0
+    x1_conv = figsize[0] * 100
+    word_dimensions = _get_word_dimensions(words=text, figsize=figsize, font_size=fontsize)
     word_spacing = space_width * 1.5
-    line_start = x0 + space_width * 2 + margin_text[0] * (x1 - x0)
-    line_end = x1 - space_width * 2 - margin_text[1] * (x1 - x0)
+    line_start = x0_conv + space_width * 2 + margin_text[0] * (x1_conv - x0_conv)
+    line_end = x1_conv - space_width * 2 - margin_text[1] * (x1_conv - x0_conv)
     line_lengths = _get_line_lengths(
         word_dimensions=word_dimensions,
         word_spacing=word_spacing,
         line_start=line_start,
         line_end=line_end,
     )
-    # compute left margin to adjust center each line
-    left_margins = []
-    for line_length in line_lengths:
-        left_margin = (line_end - line_start - line_length) / 2
-        left_margins.append(float(left_margin))
-    if debug:
-        print("line_lengths:", line_lengths)
-        print("left_margins:", left_margins)
+    left_margins = [(line_end - line_start - ll) / 2 for ll in line_lengths]
 
-    # add text
-    conversion_factor = figsize[0] * 100
+    # determine text player indices (remaining players)
+    text_player_indices = sorted(set(range(iv.n_players)) - set(all_image_indices))
+    if len(text_player_indices) < len(text):
+        # fallback to legacy contiguous assignment if counts don't match
+        start = total_image_players
+        text_player_indices = list(range(start, start + len(text)))
+
+    # render text: place text words and register positions keyed by global player index
     line_counter = 0
     x_pos = line_start + left_margins[line_counter]
     y_pos = y0 - line_height * (1.0 + margin)
     for i, (word, dim) in enumerate(zip(text, word_dimensions)):
-        width, height = dim
-        player = (n_image_players + i,)
-        color = colors[player][:3]
-        alpha = colors[player][3]
-        if x_pos + width > line_end:
+        width_w, height_w = dim
+        player_global = text_player_indices[i]
+        if x_pos + width_w > line_end:
             line_counter += 1
             try:
                 x_pos = line_start + left_margins[line_counter]
             except IndexError:
-                x_pos = line_start + left_margins[-1]  # TODO: dirty fix
+                x_pos = line_start + left_margins[-1]
             y_pos -= line_height + line_height * line_padding
 
-        # make bbox with dashed lines
-        text_color = "black" if alpha < 0.8 else "white"
+        color = colors.get((player_global,), (1,1,1,1))[:3]
+        alpha = colors.get((player_global,), (1,1,1,1))[3]
         if not color_text:
             color = "white"
             text_color = "black"
+        else:
+            text_color = "black" if alpha < 0.8 else "white"
 
         bbox = {
             "facecolor": color,
@@ -567,16 +635,13 @@ def plot_image_and_text_together(
             "linestyle": "solid",
             "linewidth": 1.5
         }
-
         if not color_text:
             bbox["edgecolor"] = "lightgrey"
             bbox["alpha"] = 1
 
         if player_mask is not None:
             bbox["alpha"] = 1
-            if player in player_mask or player[0] in player_mask:
-                if debug:
-                    print("Drawing player:", player, "text:", word)
+            if (player_global,) in player_mask or player_global in player_mask:
                 bbox["edgecolor"] = "lightgrey"
             else:
                 if color_mask_white:
@@ -587,17 +652,14 @@ def plot_image_and_text_together(
                     bbox["facecolor"] = "lightgrey"
                     bbox["edgecolor"] = "lightgrey"
                     text_color = "lightgrey"
-                if debug:
-                    print("Skipping player:", player, "text:", word)
 
-        if condition_on_player is not None:
-            if player == (condition_on_player,):
-                bbox["edgecolor"] = "black"
-                bbox["linewidth"] = 6
-                bbox["alpha"] = 1
-                bbox["facecolor"] = "white"
-                text_color = "black"
-                bbox["linestyle"]= "--"
+        if condition_on_player is not None and player_global == condition_on_player:
+            bbox["edgecolor"] = "black"
+            bbox["linewidth"] = 6
+            bbox["alpha"] = 1
+            bbox["facecolor"] = "white"
+            text_color = "black"
+            bbox["linestyle"]= "--"
 
         ax.text(
             x_pos / conversion_factor,
@@ -608,33 +670,24 @@ def plot_image_and_text_together(
             zorder=100,
             color=text_color,
         )
-        x_pos_center = (x_pos + width / 2) / conversion_factor
+        x_pos_center = (x_pos + width_w / 2) / conversion_factor
         y_pos_center = (y_pos + line_height / 2) / conversion_factor
-        positions[len(positions)] = (x_pos_center, y_pos_center)
-        x_pos += width + word_spacing
+        positions[player_global] = (x_pos_center, y_pos_center)
+        x_pos += width_w + word_spacing
 
-    # draw positions as dots
-    for player, (x, y) in positions.items():
-        # plot black dot
-        if debug:
-            ax.text(x, y, f"{player}", zorder=1e10, va="center", ha="center")
-
-    # add interactions
+    # add interactions (uses positions keyed by global player indices)
     if iv.max_order >= 2 and plot_interactions:
-        # get top k interactions
         iv_second_order = iv.get_n_order(order=2, min_order=2, max_order=2)
         top_interactions = sort_interactions(iv_second_order, reverse=True, sort_by_abs=sort_by_abs)[:top_k]
 
-        if debug:
-            print(f"Printing top {top_k} interactions: {top_interactions}")
-
         hyper_edges_to_draw = []
         positions_to_draw = {}
-        for interaction in top_interactions:
-            interaction = interaction[0]
+        for inter in top_interactions:
+            interaction = inter[0]
             hyper_edges_to_draw.append(interaction)
             for player in interaction:
-                positions_to_draw[player] = np.array([positions[player][0], positions[player][1]])
+                if player in positions:
+                    positions_to_draw[player] = np.array([positions[player][0] * 2.1 - .9, positions[player][1]*1.4 - 0.2])
 
         draw_fancy_hyper_edges(
             axis=ax,
@@ -645,7 +698,7 @@ def plot_image_and_text_together(
 
     plt.tight_layout(pad=0.05)
     if not show:
-        return fig
+        return fig, ax, positions
 
 
 def image_into_patches(img: np.ndarray, n_patches: int) -> list[np.ndarray]:
