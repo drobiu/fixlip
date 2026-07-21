@@ -47,7 +47,7 @@ class VisionLanguageGame(Game):
         self.grid_step = grid_step
         self.true_grid_size = int(np.ceil(self.grid_size / self.grid_step))
         if self.means:
-            self.n_players_image = {mod: int(self.image_size / self.patch_size) ** 2 for mod, typ in self.modality_types.items() if typ == 'image'}
+            self.n_players_image = {mod: int(self.image_size / self.grid_step) ** 2 for mod, typ in self.modality_types.items() if typ == 'image'}
         else:
             self.n_players_image = {mod: self.true_grid_size ** 2 for mod, typ in self.modality_types.items() if typ == 'image'}
 
@@ -411,10 +411,11 @@ class VisionLanguageGame(Game):
 
         _, c, h, w = self.inputs[mod].shape
         n_coalitions = coalitions.shape[0]
+        n_players = int(np.sqrt(self.n_players_image[mod]))
         # Expand each coalition value into a patch
         binary_masks = coalitions\
-            .repeat_interleave(self.patch_size**2, dim=1)\
-                .reshape(n_coalitions, self.grid_size, self.grid_size, self.patch_size, self.patch_size)
+            .repeat_interleave(self.grid_step**2, dim=1)\
+                .reshape(n_coalitions, n_players, n_players, self.grid_step, self.grid_step)
         # Rearrange to form the final batch of full-size images
         binary_masks = binary_masks\
             .permute(0, 1, 3, 2, 4)\
