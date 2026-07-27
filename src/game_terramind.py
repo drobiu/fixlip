@@ -41,7 +41,8 @@ class VisionLanguageGame(Game):
 
         # self.inputs_tokenized = self._processor_function(self.inputs)
 
-        self.image_size = 224
+        self.image_size = next(iter(self.inputs.values())).shape[2]
+        print(self.image_size)
         self.patch_size = 16 # * grid_step
 
         self.grid_size = self.image_size // self.patch_size
