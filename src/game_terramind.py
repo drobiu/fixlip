@@ -17,7 +17,7 @@ class VisionLanguageGame(Game):
     modalities: dict(str, str) mapping modality name consistent with inputs to the modality type, either text or image
     mask_names: dict(str, str) mapping modality name to the name of the mask to be used for that modality in the model forward function (if applicable)
     """
-    def __init__(self, model, inputs, modalities, mask_names=None, batch_size=1, grid_step=2, verbose=False, cl=1, means=None):
+    def __init__(self, model, inputs, modalities, mask_names=None, batch_size=1, grid_step=2, verbose=False, cl=1, means=None, aggregation_func=lambda x: x):
         self.model = model
         self.model_type = "terramind" 
 
@@ -37,8 +37,9 @@ class VisionLanguageGame(Game):
         self.device = next(model.parameters()).device
 
         self.batch_size = batch_size
+        self.aggregation_func = aggregation_func
 
-        self.inputs_tokenized = self._processor_function(self.inputs)
+        # self.inputs_tokenized = self._processor_function(self.inputs)
 
         self.image_size = 224
         self.patch_size = 16 # * grid_step
@@ -52,7 +53,7 @@ class VisionLanguageGame(Game):
             self.n_players_image = {mod: self.true_grid_size ** 2 for mod, typ in self.modality_types.items() if typ == 'image'}
 
         # remove the eos token
-        self.n_players_text = {mod: (self.inputs_tokenized[self.mask_names[mod]]['tensor'][0] != 3).count_nonzero().item() for mod, typ in self.modality_types.items() if typ == 'text'}
+        # self.n_players_text = {mod: (self.inputs_tokenized[self.mask_names[mod]]['tensor'][0] != 3).count_nonzero().item() for mod, typ in self.modality_types.items() if typ == 'text'}
 
         self.n_players = sum(self.n_players_image.values()) #+ sum(self.n_players_text.values())
 
@@ -60,9 +61,11 @@ class VisionLanguageGame(Game):
         coalitions = np.zeros((2, self.n_players), dtype=bool)
 
         coalitions[1, :] = True
-        game_output = self.value_function(coalitions=coalitions)
+        game_output = self.value_function(coalitions=coalitions).reshape(-1)
         self.empty_value = float(game_output[0])
         self.full_value = float(game_output[1])
+
+        self.dev = {}
 
         if verbose:
             print(f"Similarly of the Image and Text: {self.full_value} (empty_value={self.empty_value})")
@@ -140,7 +143,10 @@ class VisionLanguageGame(Game):
 
                     means = torch.tensor(self.means[mod]).to(self.device)
                     means = means.reshape(1, c, 1, 1).repeat((b, 1, h, w))
-                    batch_inputs[mod] = batch_mod * mask_mod.logical_not() + means * mask_mod
+                    if self.means:
+                        batch_inputs[mod] = batch_mod * mask_mod + means * mask_mod.logical_not()
+                    else:
+                        batch_inputs[mod] = batch_mod * mask_mod.logical_not() + means * mask_mod
 
                 with torch.no_grad():
                     outputs = self.model.forward(deepcopy(batch_inputs))
@@ -148,7 +154,7 @@ class VisionLanguageGame(Game):
                 with torch.no_grad():
                     outputs = self.model.forward(inputs, mask=mask)
 
-            outputs = outputs['LULC'].mean((2, 3))[:, self.cl].cpu()
+            outputs = self.aggregation_func(outputs)
             # outputs = torch.argmax(outputs.output, dim=1).float().mean((1,2)).cpu()
 
             # outputs = (outputs['LULC'].argmax(axis=1) == self.cl).to(torch.float).mean((1, 2)).cpu()
@@ -269,13 +275,20 @@ class VisionLanguageGame(Game):
                 batch_inputs = {}
 
                 for mod in modality_masks:
+                    self.dev[mod] = {}
                     batch_mod = torch.concat(combined_input[mod][i:i+batch_size], axis=0)
                     mask_mod = torch.concat(combined_masks[mod][i:i+batch_size], axis=0)
                     b, c, h, w = batch_mod.shape
 
                     means = torch.tensor(self.means[self.mask_to_input_names[mod]]).to(self.device)
                     means = means.reshape(1, c, 1, 1).repeat((b, 1, h, w))
-                    batch_inputs[self.mask_to_input_names[mod]] = batch_mod * mask_mod.logical_not() + means * mask_mod
+                    if self.means:
+                        batch_inputs[self.mask_to_input_names[mod]] = batch_mod * mask_mod + means * mask_mod.logical_not()
+                    else:
+                        batch_inputs[self.mask_to_input_names[mod]] = batch_mod * mask_mod.logical_not() + means * mask_mod
+
+                    self.dev[mod]['mask'] = mask_mod
+                    self.dev[mod]['input'] = batch_inputs[self.mask_to_input_names[mod]]
 
                 with torch.no_grad():
                     batch_outputs = self.model.forward(deepcopy(batch_inputs))
@@ -286,12 +299,9 @@ class VisionLanguageGame(Game):
                 with torch.no_grad():
                     batch_outputs = self.model.forward(batch_inputs, mask=batch_masks)
 
-            # batch_outputs = batch_outputs['LULC'][:, :, 100:150, 100:150].mean((1, 2))[:, self.cl, None].cpu()
-            batch_outputs = batch_outputs['LULC'].mean((2, 3))[:, self.cl, None].cpu()
-            # batch_outputs = torch.argmax(batch_outputs.output, dim=1).float().cpu().mean((1, 2))
-            # batch_outputs = (batch_outputs['LULC'].argmax(axis=1) == self.cl).to(torch.float).mean((1, 2)).cpu()
-            # batch_outputs = batch_outputs['LULC'].softmax(1).mean((2, 3))[:, self.cl, None].cpu()
-            # self.vals.append(batch_outputs)
+            self.dev['out'] = batch_outputs
+            batch_outputs = self.aggregation_func(batch_outputs)
+
             outputs.append(batch_outputs)
         outputs = torch.concat(outputs, axis=0)
         return outputs.reshape(*mask_sizes, 1)
