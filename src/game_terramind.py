@@ -271,12 +271,18 @@ class VisionLanguageGame(Game):
 
         outputs = []
 
+        self.dev['out'] = []
+        for mod in modality_masks:
+            self.dev[mod] = {}
+            self.dev[mod]['mask'] = []
+            self.dev[mod]['input'] = []
+        
         for i in range(0, np.prod(mask_sizes), batch_size):
             if self.means:
                 batch_inputs = {}
 
                 for mod in modality_masks:
-                    self.dev[mod] = {}
+                    
                     batch_mod = torch.concat(combined_input[mod][i:i+batch_size], axis=0)
                     mask_mod = torch.concat(combined_masks[mod][i:i+batch_size], axis=0)
                     b, c, h, w = batch_mod.shape
@@ -288,8 +294,8 @@ class VisionLanguageGame(Game):
                     else:
                         batch_inputs[self.mask_to_input_names[mod]] = batch_mod * mask_mod.logical_not() + means * mask_mod
 
-                    self.dev[mod]['mask'] = mask_mod
-                    self.dev[mod]['input'] = batch_inputs[self.mask_to_input_names[mod]]
+                    self.dev[mod]['mask'].append(mask_mod)
+                    self.dev[mod]['input'].append(batch_inputs[self.mask_to_input_names[mod]])
 
                 with torch.no_grad():
                     batch_outputs = self.model.forward(deepcopy(batch_inputs))
@@ -300,11 +306,15 @@ class VisionLanguageGame(Game):
                 with torch.no_grad():
                     batch_outputs = self.model.forward(batch_inputs, mask=batch_masks)
 
-            self.dev['out'] = batch_outputs
+            self.dev['out'].append(batch_outputs.output)
             batch_outputs = self.aggregation_func(batch_outputs)
 
             outputs.append(batch_outputs)
         outputs = torch.concat(outputs, axis=0)
+        for mod in modality_masks:
+            self.dev[mod]['mask'] = torch.concat(self.dev[mod]['mask'], axis=0)
+            self.dev[mod]['input'] = torch.concat(self.dev[mod]['input'], axis=0)
+        self.dev['out'] = torch.concat(self.dev['out'], axis=0)
         return outputs.reshape(*mask_sizes, 1)
     
 

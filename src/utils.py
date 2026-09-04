@@ -8,16 +8,15 @@ import numpy as np
 from shapiq import InteractionValues
 
 
-def save_game(path, game, sampling_adjustment_weights):
+def save_game(path, game, interaction_values, sampling_adjustment_weights):
     if not path.endswith(".npz"):
         path += ".npz"
-    game.value_storage.astype(np.float16)
     coalitions_in_storage = shapiq.utils.transform_coalitions_to_array(
-        coalitions=game.coalition_lookup, n_players=game.n_players
+        coalitions=interaction_values.interaction_lookup, n_players=game.n_players
     ).astype(bool)
     np.savez_compressed(
         path,
-        values=game.value_storage,
+        values=np.array(list(interaction_values.interactions.values())).astype(np.float16),
         coalitions=coalitions_in_storage,
         sampling_adjustment_weights=sampling_adjustment_weights,
         n_players=game.n_players,
